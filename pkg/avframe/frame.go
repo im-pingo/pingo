@@ -1,4 +1,4 @@
-package mode
+package avframe
 
 import (
 	"encoding/binary"
@@ -9,6 +9,8 @@ type FmtType int8
 
 const (
 	FormatRaw FmtType = iota
+	FormatAudioSample
+	FormatVideoSample
 	FormatRtmp
 	FormatFlv
 	FormatMpegts

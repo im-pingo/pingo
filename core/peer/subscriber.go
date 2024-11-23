@@ -1,14 +1,13 @@
 package peer
 
-import (
-	"github.com/pingostack/pingos/core/mode"
-)
+import "github.com/pingostack/pingos/pkg/avframe"
 
 type Subscriber interface {
-	mode.WriteCloser
+	avframe.WriteCloser
 	// ID returns the unique identifier of the subscriber
 	ID() string
-	Format() mode.FmtType
-	AudioCodecSupported() []mode.CodecType
-	VideoCodecSupported() []mode.CodecType
+	Format() avframe.FmtType
+	AudioCodecSupported() []avframe.CodecType
+	VideoCodecSupported() []avframe.CodecType
+	SetProcessor(processor avframe.Processor)
 }

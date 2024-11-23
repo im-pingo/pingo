@@ -3,44 +3,45 @@ package stream
 import (
 	"context"
 	"fmt"
+	"io"
 
-	"github.com/pingostack/pingos/core/mode"
 	"github.com/pingostack/pingos/core/plugin"
+	"github.com/pingostack/pingos/pkg/avframe"
 )
 
 type Format struct {
-	fmtType       mode.FmtType
+	fmtType       avframe.FmtType
 	ctx           context.Context
 	cancel        context.CancelFunc
-	data          chan *mode.Frame
-	demuxer       plugin.Demuxer
-	audioDecoder  plugin.Decoder
-	videoDecoder  plugin.Decoder
-	audioEncoder  plugin.Encoder
-	videoEncoder  plugin.Encoder
+	data          chan *avframe.Frame
+	demuxer       *avframe.Transmit
+	audioDecoder  *avframe.Transmit
+	videoDecoder  *avframe.Transmit
+	audioEncoder  *avframe.Transmit
+	videoEncoder  *avframe.Transmit
 	muxer         plugin.Muxer
-	audioProcess  *mode.Transmit
-	videoProcess  *mode.Transmit
-	audioFeedback *mode.Transmit
-	videoFeedback *mode.Transmit
+	audioProcess  *avframe.Transmit
+	videoProcess  *avframe.Transmit
+	audioFeedback *avframe.Transmit
+	videoFeedback *avframe.Transmit
 }
 
 type FormatSettings struct {
-	Demuxer      plugin.Demuxer
-	AudioDecoder plugin.Decoder
-	VideoDecoder plugin.Decoder
-	AudioEncoder plugin.Encoder
-	VideoEncoder plugin.Encoder
+	Demuxer      *avframe.Transmit
+	AudioDecoder *avframe.Transmit
+	VideoDecoder *avframe.Transmit
+	AudioEncoder *avframe.Transmit
+	VideoEncoder *avframe.Transmit
 	Muxer        plugin.Muxer
 }
 
-func NewFormat(ctx context.Context, fmtType mode.FmtType, settings *FormatSettings) (*Format, error) {
+func NewFormat(ctx context.Context, fmtType avframe.FmtType, settings *FormatSettings) (*Format, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	f := &Format{
 		fmtType: fmtType,
 		ctx:     ctx,
 		cancel:  cancel,
-		data:    make(chan *mode.Frame, 1024),
+		data:    make(chan *avframe.Frame, 1024),
 	}
 
 	if settings != nil {
@@ -52,44 +53,23 @@ func NewFormat(ctx context.Context, fmtType mode.FmtType, settings *FormatSettin
 		f.muxer = settings.Muxer
 	}
 
-	var videoProcessors, audioProcessors []mode.Processor
-	if f.demuxer != nil {
-		videoProcessors = append(videoProcessors, f.demuxer)
-		audioProcessors = append(audioProcessors, f.demuxer)
-	}
-	if f.audioDecoder != nil {
-		audioProcessors = append(audioProcessors, f.audioDecoder)
-	}
-	if f.videoDecoder != nil {
-		videoProcessors = append(videoProcessors, f.videoDecoder)
-	}
-	if f.audioEncoder != nil {
-		audioProcessors = append(audioProcessors, f.audioEncoder)
-	}
-	if f.videoEncoder != nil {
-		videoProcessors = append(videoProcessors, f.videoEncoder)
-	}
-	if f.muxer != nil {
-		videoProcessors = append(videoProcessors, f.muxer)
-		audioProcessors = append(audioProcessors, f.muxer)
-	}
-
-	f.videoProcess, f.videoFeedback = mode.CreateTransmit(videoProcessors...)
-	f.audioProcess, f.audioFeedback = mode.CreateTransmit(audioProcessors...)
-
 	return f, nil
 }
 
-func (f *Format) Process(frame *mode.Frame) (*mode.Frame, error) {
-	if f.videoProcess == nil && f.audioProcess == nil {
-		return frame, nil
-	}
-
+func (f *Format) Write(frame *avframe.Frame) error {
 	if f.videoProcess != nil && frame.IsVideo() {
-		return f.videoProcess.Process(frame)
+		return f.videoProcess.Write(frame)
 	}
 	if f.audioProcess != nil && frame.IsAudio() {
-		return f.audioProcess.Process(frame)
+		return f.audioProcess.Write(frame)
+	}
+	return nil
+}
+
+func (f *Format) Read() (*avframe.Frame, error) {
+	frame, ok := <-f.data
+	if !ok {
+		return nil, io.EOF
 	}
 	return frame, nil
 }
@@ -99,7 +79,7 @@ func (f *Format) Close() error {
 	return nil
 }
 
-func (f *Format) Feedback(fb *mode.Feedback) error {
+func (f *Format) Feedback(fb *avframe.Feedback) error {
 	fmt.Printf("format feedback: %+v\n", fb)
 	if f.videoFeedback != nil {
 		f.videoFeedback.Feedback(fb)

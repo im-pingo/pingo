@@ -1,13 +1,11 @@
 package peer
 
-import (
-	"github.com/pingostack/pingos/core/mode"
-)
+import "github.com/pingostack/pingos/pkg/avframe"
 
 type Publisher interface {
-	mode.ReadCloser
+	avframe.ReadCloser
 	// ID returns the unique identifier of the publisher
 	ID() string
-	Format() mode.FmtType
-	AddWriter(writer mode.WriteCloser) error
+	Format() avframe.FmtType
+	Metadata() *avframe.Metadata
 }
