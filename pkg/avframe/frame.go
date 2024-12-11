@@ -2,237 +2,130 @@ package avframe
 
 import (
 	"encoding/binary"
-	"slices"
+	"encoding/json"
+	"fmt"
 )
 
-type FmtType int8
-
-const (
-	FormatRaw FmtType = iota
-	FormatAudioSample
-	FormatVideoSample
-	FormatRtmp
-	FormatFlv
-	FormatMpegts
-	FormatRtpRtcp
-)
-
-type CodecTypeSupported struct {
-	VideoCodecTypes []CodecType
-	AudioCodecTypes []CodecType
+type AudioHeader struct {
+	Codec CodecType
+	Rate  uint16
+	Bits  uint8
 }
 
-type FmtSupported map[FmtType]CodecTypeSupported
-
-func (fs FmtSupported) GetSupportedVideoCodecTypes(f FmtType) []CodecType {
-	supported, ok := fs[f]
-	if !ok {
-		return nil
-	}
-	return supported.VideoCodecTypes
+func (h AudioHeader) Len() int {
+	return 4
 }
 
-func (fs FmtSupported) GetSuitableVideoCodecType(f FmtType, codecType CodecType) CodecType {
-	supported := fs.GetSupportedVideoCodecTypes(f)
-	if slices.Contains(supported, codecType) {
-		return codecType
-	}
-	if len(supported) > 0 {
-		return supported[0]
-	}
-	return CodecTypeUnknown
+func (h AudioHeader) String() string {
+	return fmt.Sprintf("AudioHeader{Codec: %s, Rate: %d, Bits: %d}", h.Codec, h.Rate, h.Bits)
 }
 
-func (fs FmtSupported) GetSuitableAudioCodecType(f FmtType, codecType CodecType) CodecType {
-	supported := fs.GetSupportedAudioCodecTypes(f)
-	if slices.Contains(supported, codecType) {
-		return codecType
-	}
-	if len(supported) > 0 {
-		return supported[0]
-	}
-	return CodecTypeUnknown
+type VideoHeader struct {
+	Codec       CodecType
+	Orientation uint8
 }
 
-func (fs FmtSupported) GetSupportedAudioCodecTypes(f FmtType) []CodecType {
-	supported, ok := fs[f]
-	if !ok {
-		return nil
-	}
-	return supported.AudioCodecTypes
+func (h VideoHeader) Len() int {
+	return 2
 }
 
-var fmtSupported = FmtSupported{
-	FormatFlv: {
-		VideoCodecTypes: []CodecType{
-			CodecTypeH264,
-			CodecTypeH265,
-		},
-		AudioCodecTypes: []CodecType{
-			CodecTypeAAC,
-			CodecTypeMP3,
-		},
-	},
-	FormatRtmp: {
-		VideoCodecTypes: []CodecType{
-			CodecTypeH264,
-			CodecTypeH265,
-		},
-		AudioCodecTypes: []CodecType{
-			CodecTypeAAC,
-			CodecTypeMP3,
-		},
-	},
-	FormatMpegts: {
-		VideoCodecTypes: []CodecType{
-			CodecTypeH264,
-			CodecTypeH265,
-		},
-		AudioCodecTypes: []CodecType{
-			CodecTypeAAC,
-			CodecTypeMP3,
-		},
-	},
-	FormatRtpRtcp: {
-		VideoCodecTypes: []CodecType{
-			CodecTypeVP8,
-			CodecTypeVP9,
-			CodecTypeH264,
-			CodecTypeH265,
-		},
-		AudioCodecTypes: []CodecType{
-			CodecTypeAAC,
-			CodecTypeMP3,
-			CodecTypeOPUS,
-			CodecTypeG711,
-		},
-	},
-}
-
-func GetSupportedVideoCodecTypes(f FmtType) []CodecType {
-	return fmtSupported.GetSupportedVideoCodecTypes(f)
-}
-
-func GetSuitableVideoCodecType(f FmtType, codecType CodecType) CodecType {
-	return fmtSupported.GetSuitableVideoCodecType(f, codecType)
-}
-
-func GetSupportedAudioCodecTypes(f FmtType) []CodecType {
-	return fmtSupported.GetSupportedAudioCodecTypes(f)
-}
-
-func GetSuitableAudioCodecType(f FmtType, codecType CodecType) CodecType {
-	return fmtSupported.GetSuitableAudioCodecType(f, codecType)
-}
-
-func DupFmtSupported() FmtSupported {
-	result := make(FmtSupported)
-	for k, v := range fmtSupported {
-		result[k] = v
-	}
-	return result
-}
-
-func (f FmtType) String() string {
-	switch f {
-	case FormatRaw:
-		return "raw"
-	case FormatRtmp:
-		return "rtmp"
-	case FormatFlv:
-		return "flv"
-	case FormatMpegts:
-		return "mpegts"
-	case FormatRtpRtcp:
-		return "rtprtcp"
-	}
-	return "unknown"
-}
-
-type CodecType uint8
-
-const (
-	CodecTypeUnknown CodecType = iota
-	CodecTypeYUV
-	CodecTypeH264
-	CodecTypeH265
-	CodecTypeVP8
-	CodecTypeVP9
-	CodecTypeVideoCount
-	CodecTypeOPUS
-	CodecTypeAAC
-	CodecTypeMP3
-	CodecTypeG711
-	CodecTypeAudioCount
-)
-
-func (c CodecType) IsVideo() bool {
-	return c > CodecTypeUnknown && c < CodecTypeVideoCount
-}
-
-func (c CodecType) IsAudio() bool {
-	return c > CodecTypeVideoCount && c < CodecTypeAudioCount
-}
-
-func (c CodecType) String() string {
-	switch c {
-	case CodecTypeYUV:
-		return "yuv"
-	case CodecTypeH264:
-		return "h264"
-	case CodecTypeH265:
-		return "h265"
-	case CodecTypeVP8:
-		return "vp8"
-	case CodecTypeVP9:
-		return "vp9"
-	case CodecTypeOPUS:
-		return "opus"
-	case CodecTypeAAC:
-		return "aac"
-	case CodecTypeG711:
-		return "g711"
-	}
-	return "unknown"
+func (h VideoHeader) String() string {
+	return fmt.Sprintf("VideoHeader{Codec: %s, Orientation: %d}", h.Codec, h.Orientation)
 }
 
 type Frame struct {
-	Fmt    FmtType
-	Codec  CodecType
-	Ts     uint64
-	Length uint32
-	TTL    uint8
-	Data   []byte
+	Fmt         FmtType
+	PayloadType PayloadType
+	Ts          uint64
+	Length      uint32
+	TTL         uint8
+	Attributes  map[string]string
+	Data        []byte
+}
+
+type PayloadType uint8
+
+const (
+	PayloadTypeUnknown PayloadType = iota
+	PayloadTypeMetadata
+	PayloadTypeAudio
+	PayloadTypeVideo
+	PayloadTypeData
+)
+
+func (p PayloadType) String() string {
+	switch p {
+	case PayloadTypeAudio:
+		return "audio"
+	case PayloadTypeVideo:
+		return "video"
+	case PayloadTypeData:
+		return "data"
+	case PayloadTypeMetadata:
+		return "metadata"
+	}
+	return "unknown"
+}
+
+func PayloadTypeFromString(s string) PayloadType {
+	switch s {
+	case "audio":
+		return PayloadTypeAudio
+	case "video":
+		return PayloadTypeVideo
+	case "data":
+		return PayloadTypeData
+	case "metadata":
+		return PayloadTypeMetadata
+	}
+	return PayloadTypeUnknown
+}
+
+func (p *PayloadType) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	*p = PayloadTypeFromString(s)
+	return nil
+}
+
+func (p PayloadType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(p.String())
 }
 
 func (f *Frame) IsVideo() bool {
-	return f.Codec.IsVideo()
+	return f.PayloadType == PayloadTypeVideo
 }
 
 func (f *Frame) IsAudio() bool {
-	return f.Codec.IsAudio()
+	return f.PayloadType == PayloadTypeAudio
+}
+
+func (f *Frame) IsMetadata() bool {
+	return f.PayloadType == PayloadTypeMetadata
 }
 
 func (f *Frame) Reset() {
 	f.Fmt = FormatRaw
-	f.Codec = CodecTypeUnknown
+	f.PayloadType = PayloadTypeUnknown
 	f.Length = 0
 	f.Data = nil
 }
 
 func (f *Frame) Dup() *Frame {
 	return &Frame{
-		Fmt:    f.Fmt,
-		Codec:  f.Codec,
-		Ts:     f.Ts,
-		Length: f.Length,
-		Data:   append([]byte(nil), f.Data...),
+		Fmt:         f.Fmt,
+		PayloadType: f.PayloadType,
+		Ts:          f.Ts,
+		Length:      f.Length,
+		Data:        append([]byte(nil), f.Data...),
 	}
 }
 
 func (f *Frame) CopyFrom(src *Frame) {
 	f.Fmt = src.Fmt
-	f.Codec = src.Codec
+	f.PayloadType = src.PayloadType
 	f.Ts = src.Ts
 	f.Length = src.Length
 	f.Data = append([]byte(nil), src.Data...)
@@ -240,7 +133,7 @@ func (f *Frame) CopyFrom(src *Frame) {
 
 func (f *Frame) CopyTo(dst []byte) []byte {
 	dst = append(dst, byte(f.Fmt))
-	dst = append(dst, byte(f.Codec))
+	dst = append(dst, byte(f.PayloadType))
 	binary.BigEndian.PutUint64(dst[2:10], f.Ts)
 	binary.BigEndian.PutUint32(dst[10:14], f.Length)
 	dst = append(dst, f.Data...)
@@ -254,15 +147,74 @@ func (f *Frame) Len() int {
 func ParseFrame(p []byte) *Frame {
 	// parse frame header, fmt[1 byte], codec[1 byte], ts[8 bytes]
 	fmtType := p[0]
-	codecType := p[1]
+	payloadType := p[1]
 	ts := binary.BigEndian.Uint64(p[2:10])
 	length := binary.BigEndian.Uint32(p[10:14])
 
 	return &Frame{
-		Fmt:    FmtType(fmtType),
-		Codec:  CodecType(codecType),
-		Ts:     ts,
-		Length: length,
-		Data:   p[14:],
+		Fmt:         FmtType(fmtType),
+		PayloadType: PayloadType(payloadType),
+		Ts:          ts,
+		Length:      length,
+		Data:        p[14:],
+	}
+}
+
+func (f *Frame) GetVideoHeader() *VideoHeader {
+	if !f.IsVideo() {
+		return nil
+	}
+
+	header := &VideoHeader{}
+	header.Codec = CodecType(f.Data[0])
+	header.Orientation = f.Data[1]
+	return header
+}
+
+func (f *Frame) GetAudioHeader() *AudioHeader {
+	if !f.IsAudio() {
+		return nil
+	}
+
+	header := &AudioHeader{}
+	header.Codec = CodecType(f.Data[0])
+	header.Rate = binary.BigEndian.Uint16(f.Data[1:3])
+	header.Bits = f.Data[3]
+	return header
+}
+
+func (f *Frame) WriteAudioHeader(header *AudioHeader) {
+	f.Data[0] = byte(header.Codec)
+	binary.BigEndian.PutUint16(f.Data[1:3], header.Rate)
+	f.Data[3] = header.Bits
+}
+
+func (f *Frame) WriteVideoHeader(header *VideoHeader) {
+	f.Data[0] = byte(header.Codec)
+	f.Data[1] = header.Orientation
+}
+
+func (f *Frame) WritePayload(payload []byte) {
+	f.Data = append(f.Data, payload...)
+}
+
+func (f *Frame) CodecType() CodecType {
+	if f.IsAudio() {
+		return f.GetAudioHeader().Codec
+	}
+	return f.GetVideoHeader().Codec
+}
+
+func (f *Frame) String() string {
+	if f.IsAudio() {
+		return fmt.Sprintf("Frame{Fmt: %s, PayloadType: %s, Ts: %d, Length: %d, TTL %d, AudioHeader: %s}", f.Fmt, f.PayloadType, f.Ts, f.Length, f.TTL, f.GetAudioHeader())
+	} else if f.IsVideo() {
+		return fmt.Sprintf("Frame{Fmt: %s, PayloadType: %s, Ts: %d, Length: %d, TTL %d, VideoHeader: %s}", f.Fmt, f.PayloadType, f.Ts, f.Length, f.TTL, f.GetVideoHeader())
+	} else if f.IsMetadata() {
+		metadata := Metadata{}
+		metadata.Unmarshal(f.Data)
+		return fmt.Sprintf("Frame{Fmt: %s, PayloadType: %s, Ts: %d, Length: %d, TTL %d, Metadata: %s}", f.Fmt, f.PayloadType, f.Ts, f.Length, f.TTL, metadata)
+	} else {
+		return fmt.Sprintf("Frame{Fmt: %s, PayloadType: %s, Ts: %d, Length: %d, TTL %d, Data: %v}", f.Fmt, f.PayloadType, f.Ts, f.Length, f.TTL, f.Data)
 	}
 }

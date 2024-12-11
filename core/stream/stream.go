@@ -3,47 +3,58 @@ package stream
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
+	"github.com/pingostack/pingos/core/errcode"
 	"github.com/pingostack/pingos/core/peer"
 	"github.com/pingostack/pingos/core/plugin"
 	"github.com/pingostack/pingos/pkg/avframe"
-	eventemitter "github.com/pingostack/pingos/pkg/eventemmiter"
+	"github.com/pingostack/pingos/pkg/logger"
 	"github.com/pkg/errors"
 )
 
 const (
-	// EventStreamActive eventemitter.EventID = iota
-	// EventStreamInactive
-	EventSubStreamEmpty eventemitter.EventID = iota
+// EventStreamActive eventemitter.EventID = iota
+// EventStreamInactive
+//
+//	EventSubStreamEmpty eventemitter.EventID = iota
 )
+
+type SubscribeResultFunc func(sub peer.Subscriber, processor avframe.Processor, err error)
+type waitingSub struct {
+	sub      peer.Subscriber
+	onResult SubscribeResultFunc
+}
 
 type Stream struct {
 	id     string
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	noopProcessor *avframe.Transmit
-	demuxer       *avframe.Transmit
-	audioDecoders map[avframe.CodecType]*avframe.Transmit
-	videoDecoders map[avframe.CodecType]*avframe.Transmit
-	audioEncoders map[avframe.CodecType]*avframe.Transmit
-	videoEncoders map[avframe.CodecType]*avframe.Transmit
-	muxers        map[avframe.FmtType]*avframe.Transmit
-	resourceLock  sync.RWMutex
+	noopProcessor *avframe.Pipeline
+	demuxer       *avframe.Pipeline
+	audioDecoders map[avframe.CodecType]*avframe.Pipeline
+	videoDecoders map[avframe.CodecType]*avframe.Pipeline
+	audioEncoders map[avframe.CodecType]*avframe.Pipeline
+	videoEncoders map[avframe.CodecType]*avframe.Pipeline
+	muxers        map[avframe.FmtType]*avframe.Pipeline
+	lock          sync.RWMutex
 
-	publisher     peer.Publisher
-	publisherLock sync.RWMutex
-	subStreams    map[avframe.FmtType]*subStream
+	publisher peer.Publisher
 
-	waitingSubs     []peer.Subscriber
-	waitingSubsLock sync.RWMutex
-	actived         atomic.Bool
+	subStreams map[avframe.FmtType]*subStream
 
-	eventHandle eventemitter.EventEmitter
-	onceActive  sync.Once
+	waitingSubs []waitingSub
+	closed      bool
+
+	//	eventHandle eventemitter.EventEmitter
+
+	onceClose sync.Once
+	logger    logger.Logger
 }
 
 func NewStream(ctx context.Context, id string) *Stream {
@@ -52,34 +63,24 @@ func NewStream(ctx context.Context, id string) *Stream {
 		id:            id,
 		ctx:           ctx,
 		cancel:        cancel,
-		audioDecoders: make(map[avframe.CodecType]*avframe.Transmit),
-		videoDecoders: make(map[avframe.CodecType]*avframe.Transmit),
-		audioEncoders: make(map[avframe.CodecType]*avframe.Transmit),
-		videoEncoders: make(map[avframe.CodecType]*avframe.Transmit),
-		muxers:        make(map[avframe.FmtType]*avframe.Transmit),
+		audioDecoders: make(map[avframe.CodecType]*avframe.Pipeline),
+		videoDecoders: make(map[avframe.CodecType]*avframe.Pipeline),
+		audioEncoders: make(map[avframe.CodecType]*avframe.Pipeline),
+		videoEncoders: make(map[avframe.CodecType]*avframe.Pipeline),
+		muxers:        make(map[avframe.FmtType]*avframe.Pipeline),
 		subStreams:    make(map[avframe.FmtType]*subStream),
-		waitingSubs:   make([]peer.Subscriber, 0),
-		eventHandle:   eventemitter.NewEventEmitter(ctx, 1024),
-		onceActive:    sync.Once{},
+		waitingSubs:   make([]waitingSub, 0),
+		//		eventHandle:     eventemitter.NewEventEmitter(ctx, 1024),
+		logger: logger.WithFields(map[string]interface{}{"stream": id}),
 	}
-
-	stream.eventHandle.On(EventSubStreamEmpty, func(data interface{}) (interface{}, error) {
-		ss := data.(*subStream)
-		go func() {
-			time.Sleep(10 * time.Second)
-			if ss.CloseIfEmpty() {
-				stream.deleteSubStream(ss.Format())
-			}
-		}()
-		return nil, nil
-	})
 
 	return stream
 }
 
 func (s *Stream) deleteSubStream(fmtType avframe.FmtType) {
-	s.resourceLock.Lock()
-	defer s.resourceLock.Unlock()
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
 	delete(s.subStreams, fmtType)
 }
 
@@ -87,225 +88,246 @@ func (s *Stream) GetID() string {
 	return s.id
 }
 
-func (s *Stream) getOrCreateMuxer(fmtType avframe.FmtType) (*avframe.Transmit, bool) {
-	if muxer, found := s.muxers[fmtType]; found {
-		return muxer, false
+func appendCodecPipeline(prev *avframe.Pipeline, srcMap map[avframe.CodecType]*avframe.Pipeline, targetCodecType avframe.CodecType, createPlugin func() (avframe.Processor, error)) (pipeline *avframe.Pipeline, backout func(*error), err error) {
+	if pipeline, found := srcMap[targetCodecType]; found {
+		return pipeline, func(err *error) {}, nil
 	}
-	muxer, err := plugin.CreateMuxerPlugin(s.ctx, fmtType)
-	if err != nil {
-		return nil, false
+
+	if processor, e := createPlugin(); e != nil {
+		return nil, func(err *error) {}, e
+	} else {
+		pipeline = avframe.NewPipeline(processor)
 	}
-	transmit := avframe.NewTransmit(muxer)
-	return transmit, true
+
+	srcMap[targetCodecType] = pipeline
+	prev.AddNext(pipeline, avframe.WithoutPayloadType(avframe.PayloadTypeVideo))
+
+	return pipeline, func(err *error) {
+		if err != nil && *err != nil {
+			prev.RemoveNext(pipeline)
+			delete(srcMap, targetCodecType)
+			pipeline.Close()
+		}
+	}, nil
 }
 
-func (s *Stream) getOrCreateDemuxer() (*avframe.Transmit, error) {
+// Unified method to add decoder and encoder if needed
+func (s *Stream) appendTranscodePipeline(ctx context.Context, prevPipeline *avframe.Pipeline, targetCodecType avframe.CodecType) (encoderPipeline *avframe.Pipeline, backouts []func(*error), err error) {
+	metadata := prevPipeline.Metadata()
+	isAudio := targetCodecType.IsAudio()
+	var originalCodecType avframe.CodecType
+	var decoderPipelineMap map[avframe.CodecType]*avframe.Pipeline
+	var encoderPipelineMap map[avframe.CodecType]*avframe.Pipeline
+	if isAudio {
+		originalCodecType = metadata.AudioCodecType
+		decoderPipelineMap = s.audioDecoders
+		encoderPipelineMap = s.audioEncoders
+	} else {
+		originalCodecType = metadata.VideoCodecType
+		decoderPipelineMap = s.videoDecoders
+		encoderPipelineMap = s.videoEncoders
+	}
+
+	decoderPipeline, decoderBackout, err := appendCodecPipeline(prevPipeline, decoderPipelineMap, originalCodecType, func() (avframe.Processor, error) {
+		return plugin.CreateDecoderPlugin(ctx, originalCodecType, metadata)
+	})
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "create decoder")
+	}
+
+	backouts = append(backouts, decoderBackout)
+
+	var encoderBackout func(*error)
+	encoderPipeline, encoderBackout, err = appendCodecPipeline(decoderPipeline, encoderPipelineMap, targetCodecType, func() (avframe.Processor, error) {
+		return plugin.CreateEncoderPlugin(ctx, targetCodecType, decoderPipeline.Metadata())
+	})
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "create encoder")
+	}
+
+	backouts = append(backouts, encoderBackout)
+
+	return encoderPipeline, backouts, nil
+}
+
+func (s *Stream) appendDemuxer(prev *avframe.Pipeline, metadata avframe.Metadata) (pipeline *avframe.Pipeline, backout func(*error), err error) {
 	if s.demuxer != nil {
-		return s.demuxer, nil
+		return s.demuxer, func(err *error) {}, nil
 	}
-	metadata := s.publisher.Metadata()
-	demuxer, err := plugin.CreateDemuxerPlugin(s.ctx, metadata.FmtType)
-	if err != nil {
-		panic(errors.Wrap(err, "create demuxer"))
+
+	if processor, e := plugin.CreateDemuxerPlugin(s.ctx, metadata); e != nil {
+		return nil, func(err *error) {}, e
+	} else {
+		pipeline = avframe.NewPipeline(processor)
 	}
-	transmit := avframe.NewTransmit(demuxer)
-	return transmit, nil
+
+	if e := prev.AddNext(pipeline, avframe.WithAllPayloadTypes()); e != nil {
+		return nil, func(err *error) {}, e
+	}
+
+	s.demuxer = pipeline
+
+	return pipeline, func(err *error) {
+		if err != nil && *err != nil {
+			prev.RemoveNext(pipeline)
+			s.demuxer = nil
+			pipeline.Close()
+		}
+	}, nil
 }
 
-func (s *Stream) getOrCreateDecoder(codecType avframe.CodecType) (*avframe.Transmit, bool) {
-	if codecType.IsAudio() {
-		if decoder, found := s.audioDecoders[codecType]; found {
-			return decoder, false
-		}
-		decoder, err := plugin.CreateDecoderPlugin(s.ctx, codecType)
-		if err != nil {
-			panic(errors.Wrap(err, "create decoder"))
-		}
-		transmit := avframe.NewTransmit(decoder)
-		return transmit, true
+func (s *Stream) appendMuxer(fmtType avframe.FmtType, metadata avframe.Metadata) (pipeline *avframe.Pipeline, backout func(*error), err error) {
+	if s.muxers[fmtType] != nil {
+		return s.muxers[fmtType], func(err *error) {}, nil
 	}
 
-	if decoder, found := s.videoDecoders[codecType]; found {
-		return decoder, false
+	if processor, e := plugin.CreateMuxerPlugin(s.ctx, fmtType, metadata); e != nil {
+		return nil, func(err *error) {}, e
+	} else {
+		pipeline = avframe.NewPipeline(processor)
 	}
 
-	decoder, err := plugin.CreateDecoderPlugin(s.ctx, codecType)
-	if err != nil {
-		panic(errors.Wrap(err, "create decoder"))
+	audioEncoderPipeline, found := s.audioEncoders[metadata.AudioCodecType]
+	if found {
+		if e := audioEncoderPipeline.AddNext(pipeline, avframe.WithoutPayloadType(avframe.PayloadTypeVideo)); e != nil {
+			return nil, func(err *error) {}, e
+		}
+	} else {
+		if e := s.demuxer.AddNext(pipeline, avframe.WithoutPayloadType(avframe.PayloadTypeVideo)); e != nil {
+			return nil, func(err *error) {}, e
+		}
 	}
-	transmit := avframe.NewTransmit(decoder)
-	return transmit, true
+
+	videoEncoderPipeline, found := s.videoEncoders[metadata.VideoCodecType]
+	if found {
+		if e := videoEncoderPipeline.AddNext(pipeline, avframe.WithoutPayloadType(avframe.PayloadTypeAudio)); e != nil {
+			return nil, func(err *error) {}, e
+		}
+	} else {
+		if e := s.demuxer.AddNext(pipeline, avframe.WithoutPayloadType(avframe.PayloadTypeAudio)); e != nil {
+			return nil, func(err *error) {}, e
+		}
+	}
+
+	s.muxers[fmtType] = pipeline
+
+	return pipeline, func(err *error) {
+		if err != nil && *err != nil {
+			if audioEncoderPipeline != nil {
+				audioEncoderPipeline.RemoveNext(pipeline)
+			}
+			if videoEncoderPipeline != nil {
+				videoEncoderPipeline.RemoveNext(pipeline)
+			}
+			s.demuxer.RemoveNext(pipeline)
+			s.muxers[fmtType] = nil
+			pipeline.Close()
+		}
+	}, nil
 }
 
-func (s *Stream) getOrCreateEncoder(codecType avframe.CodecType) (*avframe.Transmit, bool) {
-	if codecType.IsAudio() {
-		if encoder, found := s.audioEncoders[codecType]; found {
-			return encoder, false
-		}
-
-		encoder, err := plugin.CreateEncoderPlugin(s.ctx, codecType)
-		if err != nil {
-			panic(errors.Wrap(err, "create encoder"))
-		}
-		transmit := avframe.NewTransmit(encoder)
-		return transmit, true
-	}
-
-	if encoder, found := s.videoEncoders[codecType]; found {
-		return encoder, false
-	}
-
-	encoder, err := plugin.CreateEncoderPlugin(s.ctx, codecType)
-	if err != nil {
-		panic(errors.Wrap(err, "create encoder"))
-	}
-	transmit := avframe.NewTransmit(encoder)
-	return transmit, true
-}
-
-func (s *Stream) createSubStream(subFmtType avframe.FmtType, fmtSupported avframe.FmtSupported) (ss *subStream, err error) {
-	var muxerTransmit *avframe.Transmit
-	var demuxerTransmit *avframe.Transmit
-	var audioDecoderTransmit *avframe.Transmit
-	var videoDecoderTransmit *avframe.Transmit
-	var audioEncoderTransmit *avframe.Transmit
-	var videoEncoderTransmit *avframe.Transmit
-
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("panic: %v", r)
-		}
-
-		if err != nil {
-			if muxerTransmit != nil {
-				muxerTransmit.Close()
-			}
-			if demuxerTransmit != nil {
-				demuxerTransmit.Close()
-			}
-			if audioDecoderTransmit != nil {
-				audioDecoderTransmit.Close()
-			}
-			if videoDecoderTransmit != nil {
-				videoDecoderTransmit.Close()
-			}
-			if audioEncoderTransmit != nil {
-				audioEncoderTransmit.Close()
-			}
-			if videoEncoderTransmit != nil {
-				videoEncoderTransmit.Close()
-			}
-		}
-	}()
+func (s *Stream) createSubStream(subFmtType avframe.FmtType, fmtSupported avframe.FmtSupported) (ss *subStream, errResult error) {
+	errResult = errors.New("failed to create substream")
 
 	if s.noopProcessor == nil {
 		return nil, fmt.Errorf("stream not activated")
 	}
 
-	create := func(processor *avframe.Transmit) (ss *subStream, err error) {
-		ss, err = newSubStream(s.ctx, processor, WithOnSubscriberEmpty(func(sub peer.Subscriber) {
-			s.eventHandle.EmitEvent(s.ctx, EventSubStreamEmpty, sub)
-		}))
+	create := func(processor *avframe.Pipeline) (ss *subStream, err error) {
+		ss, errResult = newSubStream(s.ctx, processor,
+			WithOnSubscriberEmpty(func(sub peer.Subscriber) {
+				ss.SetDeadline(time.Now().Add(time.Second * 5))
+			}),
+			WithOnSubStreamClosed(func() {
+				s.deleteSubStream(subFmtType)
+			}),
+			WithLogger(s.logger.WithField("substream", processor.Format())))
 		return
 	}
 
-	metadata := s.publisher.Metadata()
-	if metadata.FmtType == subFmtType {
+	var allBackouts []func(*error)
+	defer func() {
+		for _, backout := range allBackouts {
+			backout(&errResult)
+		}
+	}()
+
+	// if source fmt type is the same as sub fmt type, then use noop processor
+	sourceFmtType := s.publisher.Metadata().FmtType
+	if sourceFmtType == subFmtType {
 		return create(s.noopProcessor)
 	}
 
-	created := false
-	if muxerTransmit, created = s.getOrCreateMuxer(subFmtType); muxerTransmit == nil {
-		return nil, fmt.Errorf("muxer[%s] not found", subFmtType)
-	}
-	if !created {
-		return create(muxerTransmit)
+	// if demuxer already exists, then use it
+	demuxerPipeline, demuxerBackout, err := s.appendDemuxer(s.noopProcessor, s.publisher.Metadata())
+	if err != nil {
+		return nil, errors.Wrap(err, "append demuxer")
 	}
 
-	demuxerTransmit, _ = s.getOrCreateDemuxer()
-	if demuxerTransmit == nil {
-		return nil, fmt.Errorf("demuxer not found")
-	}
+	allBackouts = append(allBackouts, demuxerBackout)
 
-	// get suitable codec type for target fmt type and add decoder
+	sourceAudioCodecType := s.publisher.Metadata().AudioCodecType
+	sourceVideoCodecType := s.publisher.Metadata().VideoCodecType
+
+	// get suitable codec type for target fmt type
 	var targetAudioCodecType avframe.CodecType
 	var targetVideoCodecType avframe.CodecType
 	if fmtSupported != nil {
-		targetAudioCodecType = fmtSupported.GetSuitableAudioCodecType(subFmtType, metadata.AudioCodecType)
-		targetVideoCodecType = fmtSupported.GetSuitableVideoCodecType(subFmtType, metadata.VideoCodecType)
+		targetAudioCodecType = fmtSupported.GetSuitableAudioCodecType(subFmtType, sourceAudioCodecType)
+		targetVideoCodecType = fmtSupported.GetSuitableVideoCodecType(subFmtType, sourceVideoCodecType)
 	} else {
-		targetAudioCodecType = avframe.GetSuitableAudioCodecType(subFmtType, metadata.AudioCodecType)
-		targetVideoCodecType = avframe.GetSuitableVideoCodecType(subFmtType, metadata.VideoCodecType)
+		targetAudioCodecType = avframe.GetSuitableAudioCodecType(subFmtType, sourceAudioCodecType)
+		targetVideoCodecType = avframe.GetSuitableVideoCodecType(subFmtType, sourceVideoCodecType)
 	}
 
 	if targetAudioCodecType == avframe.CodecTypeUnknown || targetVideoCodecType == avframe.CodecTypeUnknown {
 		return nil, fmt.Errorf("no suitable codec type for target fmt type[%s]", subFmtType)
 	}
 
-	if targetAudioCodecType != metadata.AudioCodecType {
-		audioDecoderTransmit, _ = s.getOrCreateDecoder(metadata.AudioCodecType)
-		if audioDecoderTransmit == nil {
-			return nil, fmt.Errorf("audio decoder[%s] not found", metadata.AudioCodecType)
-		}
-		audioEncoderTransmit, _ = s.getOrCreateEncoder(targetAudioCodecType)
-		if audioEncoderTransmit == nil {
-			return nil, fmt.Errorf("audio encoder[%s] not found", targetAudioCodecType)
-		}
-	}
-
-	if targetVideoCodecType != metadata.VideoCodecType {
-		videoDecoderTransmit, _ = s.getOrCreateDecoder(metadata.VideoCodecType)
-		if videoDecoderTransmit == nil {
-			return nil, fmt.Errorf("video decoder[%s] not found", metadata.VideoCodecType)
-		}
-		videoEncoderTransmit, _ = s.getOrCreateEncoder(targetVideoCodecType)
-		if videoEncoderTransmit == nil {
-			return nil, fmt.Errorf("video encoder[%s] not found", targetVideoCodecType)
+	// add audio decoder and encoder if needed
+	if targetAudioCodecType != sourceAudioCodecType {
+		if _, backouts, err := s.appendTranscodePipeline(s.ctx,
+			demuxerPipeline,
+			targetAudioCodecType); err != nil {
+			return nil, errors.Wrap(err, "add audio codec pipeline")
+		} else {
+			allBackouts = append(allBackouts, backouts...)
 		}
 	}
 
-	s.muxers[subFmtType] = muxerTransmit
-
-	if s.demuxer == nil {
-		s.demuxer = demuxerTransmit
-		s.noopProcessor.AddNextAudioTransmit(demuxerTransmit)
-		s.noopProcessor.AddNextVideoTransmit(demuxerTransmit)
+	// add video decoder and encoder if needed
+	if targetVideoCodecType != sourceVideoCodecType {
+		if _, backouts, err := s.appendTranscodePipeline(s.ctx,
+			demuxerPipeline,
+			targetVideoCodecType); err != nil {
+			return nil, errors.Wrap(err, "add video codec pipeline")
+		} else {
+			allBackouts = append(allBackouts, backouts...)
+		}
 	}
 
-	if audioDecoderTransmit != nil {
-		if audioDecoderTransmit.PrevAudioTransmit() == nil {
-			demuxerTransmit.AddNextAudioTransmit(audioDecoderTransmit)
-			s.audioDecoders[targetAudioCodecType] = audioDecoderTransmit
-		}
-		if audioEncoderTransmit.PrevAudioTransmit() == nil {
-			audioDecoderTransmit.AddNextAudioTransmit(audioEncoderTransmit)
-			s.audioEncoders[targetAudioCodecType] = audioEncoderTransmit
-		}
-		audioEncoderTransmit.AddNextAudioTransmit(muxerTransmit)
-	} else {
-		demuxerTransmit.AddNextAudioTransmit(muxerTransmit)
+	// create muxer metadata
+	muxerMetadata := demuxerPipeline.Metadata()
+	muxerMetadata.FmtType = subFmtType
+	muxerMetadata.AudioCodecType = targetAudioCodecType
+	muxerMetadata.VideoCodecType = targetVideoCodecType
+
+	muxerPipeline, muxerBackout, err := s.appendMuxer(subFmtType, muxerMetadata)
+	if err != nil {
+		return nil, errors.Wrap(err, "append muxer")
 	}
 
-	if videoDecoderTransmit != nil {
-		if videoDecoderTransmit.PrevVideoTransmit() == nil {
-			demuxerTransmit.AddNextVideoTransmit(videoDecoderTransmit)
-			s.videoDecoders[targetVideoCodecType] = videoDecoderTransmit
-		}
-		if videoEncoderTransmit.PrevVideoTransmit() == nil {
-			videoDecoderTransmit.AddNextVideoTransmit(videoEncoderTransmit)
-			s.videoEncoders[targetVideoCodecType] = videoEncoderTransmit
-		}
-		videoEncoderTransmit.AddNextVideoTransmit(muxerTransmit)
-	} else {
-		demuxerTransmit.AddNextVideoTransmit(muxerTransmit)
-	}
+	allBackouts = append(allBackouts, muxerBackout)
 
-	return create(muxerTransmit)
+	return create(muxerPipeline)
+
+}
+
+func (s *Stream) publisherSet() bool {
+	return atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&s.publisher))) != nil
 }
 
 func (s *Stream) getOrCreateSubStream(fmtType avframe.FmtType, fmtSupported avframe.FmtSupported) (*subStream, error) {
-	s.resourceLock.Lock()
-	defer s.resourceLock.Unlock()
 	if _, ok := s.subStreams[fmtType]; !ok {
 		subStream, err := s.createSubStream(fmtType, fmtSupported)
 		if err != nil {
@@ -319,14 +341,14 @@ func (s *Stream) getOrCreateSubStream(fmtType avframe.FmtType, fmtSupported avfr
 }
 
 func (s *Stream) GetSubStream(fmtType avframe.FmtType) *subStream {
-	s.resourceLock.RLock()
-	defer s.resourceLock.RUnlock()
+	s.lock.RLock()
+	defer s.lock.RUnlock()
 	return s.subStreams[fmtType]
 }
 
 func (s *Stream) GetSubStreams() []*subStream {
-	s.resourceLock.RLock()
-	defer s.resourceLock.RUnlock()
+	s.lock.RLock()
+	defer s.lock.RUnlock()
 	subStreams := make([]*subStream, 0, len(s.subStreams))
 	for _, subStream := range s.subStreams {
 		subStreams = append(subStreams, subStream)
@@ -334,15 +356,7 @@ func (s *Stream) GetSubStreams() []*subStream {
 	return subStreams
 }
 
-func (s *Stream) Subscribe(sub peer.Subscriber) error {
-	s.waitingSubsLock.Lock()
-	if !s.actived.Load() {
-		s.waitingSubs = append(s.waitingSubs, sub)
-		s.waitingSubsLock.Unlock()
-		return nil
-	}
-	s.waitingSubsLock.Unlock()
-
+func (s *Stream) Subscribe(sub peer.Subscriber, onResult SubscribeResultFunc) (processor avframe.Processor, err error) {
 	fmtType := sub.Format()
 	subVideoCodecSupported := sub.VideoCodecSupported()
 	subAudioCodecSupported := sub.AudioCodecSupported()
@@ -361,26 +375,88 @@ func (s *Stream) Subscribe(sub peer.Subscriber) error {
 	// Put the modified struct back into the map
 	fmtSupported[fmtType] = currentFmt
 
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if s.closed {
+		return nil, errcode.ErrStreamClosed
+	}
+
+	if !s.publisherSet() {
+		s.waitingSubs = append(s.waitingSubs, waitingSub{
+			sub:      sub,
+			onResult: onResult,
+		})
+
+		return nil, errcode.ErrPublisherNotSet
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+
+		if onResult != nil {
+			onResult(sub, processor, err)
+		}
+	}()
+
 	subStream, err := s.getOrCreateSubStream(fmtType, fmtSupported)
 	if err != nil {
-		return errors.Wrap(err, "get or create substream")
+		return nil, errors.Wrap(err, "get or create substream")
 	}
-	subStream.Subscribe(sub)
+
+	err = subStream.Subscribe(sub)
+	if err != nil {
+		return nil, errors.Wrap(err, "subscribe substream")
+	}
+
+	return subStream, nil
+}
+
+func (s *Stream) Publish(publisher peer.Publisher) error {
+	s.logger.WithField("publisher", publisher).Info("publish")
+
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if s.closed {
+		return fmt.Errorf("stream closed")
+	}
+
+	if publisher == nil {
+		return fmt.Errorf("publisher is nil")
+	}
+
+	if s.publisher != nil {
+		return fmt.Errorf("publisher already set")
+	}
+
+	s.publisher = publisher
+
+	if s.noopProcessor == nil {
+		s.noopProcessor = avframe.NewPipeline(avframe.NewNoopProcessor(s.publisher.Metadata()))
+	}
+
+	subs := []waitingSub{}
+	subs = append(subs, s.waitingSubs...)
+	s.waitingSubs = []waitingSub{}
+
+	for _, sub := range subs {
+		_, err := s.Subscribe(sub.sub, sub.onResult)
+		if err != nil {
+			s.logger.WithFields(map[string]interface{}{
+				"sub": sub.sub,
+			}).Error(err)
+		}
+	}
+
 	return nil
 }
 
-func (s *Stream) Publish(publisher peer.Publisher) {
-	s.publisherLock.Lock()
-	defer s.publisherLock.Unlock()
-	s.publisher = publisher
-	if s.noopProcessor == nil {
-		s.noopProcessor = avframe.NewTransmit(avframe.NewNoopProcessor(publisher.Format()))
-	}
-
-	s.start()
-}
-
 func (s *Stream) Unsubscribe(sub peer.Subscriber) {
+	s.logger.WithField("sub", sub).Info("unsubscribe")
+
 	fmtType := sub.Format()
 	subStream := s.GetSubStream(fmtType)
 	if subStream == nil {
@@ -389,45 +465,71 @@ func (s *Stream) Unsubscribe(sub peer.Subscriber) {
 	subStream.Unsubscribe(sub)
 }
 
-func (s *Stream) active() {
-	s.waitingSubsLock.Lock()
-	subs := []peer.Subscriber{}
-	s.actived.Store(true)
-	subs = append(subs, s.waitingSubs...)
-	s.waitingSubs = []peer.Subscriber{}
-	s.waitingSubsLock.Unlock()
-
-	for _, sub := range subs {
-		s.Subscribe(sub)
+func (s *Stream) destory() {
+	s.logger.Info("stream destory")
+	if s.demuxer != nil {
+		s.demuxer.Close()
 	}
+	if s.noopProcessor != nil {
+		s.noopProcessor.Close()
+	}
+
+	for _, subStream := range s.subStreams {
+		subStream.Close()
+	}
+
+	for _, decoder := range s.audioDecoders {
+		decoder.Close()
+	}
+	for _, decoder := range s.videoDecoders {
+		decoder.Close()
+	}
+	for _, encoder := range s.audioEncoders {
+		encoder.Close()
+	}
+	for _, encoder := range s.videoEncoders {
+		encoder.Close()
+	}
+	for _, muxer := range s.muxers {
+		muxer.Close()
+	}
+
 }
 
-func (s *Stream) inactive() {
-	s.actived.Store(false)
+func (s *Stream) Write(publisher peer.Publisher, frame *avframe.Frame) error {
+	s.logger.Debug("stream write frame", frame)
+
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+
+	if s.closed {
+		return io.EOF
+	}
+
+	if s.publisher != publisher {
+		return fmt.Errorf("publisher not match")
+	}
+
+	if err := s.noopProcessor.Write(frame); err != nil {
+		return errors.Wrap(err, "write noop processor")
+	}
+
+	return nil
 }
 
-func (s *Stream) start() {
-	fmt.Println("stream start")
-	go func() {
-		s.active()
-		defer s.inactive()
-		for {
-			s.publisherLock.RLock()
-			publisher := s.publisher
-			s.publisherLock.RUnlock()
-			if publisher == nil {
-				return
-			}
+func (s *Stream) Close() error {
+	s.logger.Info("stream close")
+	s.onceClose.Do(func() {
+		s.lock.Lock()
+		defer s.lock.Unlock()
+		s.closed = true
+		s.cancel()
+		s.destory()
+	})
 
-			frame, err := publisher.Read()
-			if err != nil {
-				return
-			}
+	return nil
+}
 
-			fmt.Println("publisher read frame", frame)
-			s.noopProcessor.Write(frame)
-
-			time.Sleep(1 * time.Second)
-		}
-	}()
+func (s *Stream) Done() <-chan struct{} {
+	return s.ctx.Done()
 }

@@ -2,28 +2,31 @@ package decoder
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/pingostack/pingos/core/plugin"
 	"github.com/pingostack/pingos/pkg/avframe"
+	frameerror "github.com/pingostack/pingos/pkg/avframe/frame_error"
+	"github.com/pingostack/pingos/pkg/logger"
 )
 
 func init() {
-	plugin.RegisterDecoderPlugin(avframe.CodecTypeOPUS, func(ctx context.Context) (plugin.Decoder, error) {
-		return NewOPUSDecoder(ctx)
+	plugin.RegisterDecoderPlugin(avframe.CodecTypeOPUS, func(ctx context.Context, metadata avframe.Metadata) (plugin.Decoder, error) {
+		return NewOPUSDecoder(ctx, metadata)
 	})
 }
 
 type OPUSDecoder struct {
-	ctx   context.Context
-	frame *avframe.Frame
+	ctx        context.Context
+	inMetadata avframe.Metadata
+	frame      *avframe.Frame
 }
 
-func NewOPUSDecoder(ctx context.Context) (plugin.Decoder, error) {
-	return &OPUSDecoder{ctx: ctx}, nil
+func NewOPUSDecoder(ctx context.Context, metadata avframe.Metadata) (plugin.Decoder, error) {
+	return &OPUSDecoder{ctx: ctx, inMetadata: metadata}, nil
 }
 
 func (d *OPUSDecoder) Close() error {
+	logger.Info("opus decoder close")
 	return nil
 }
 
@@ -32,13 +35,24 @@ func (d *OPUSDecoder) GetCodecType() avframe.CodecType {
 }
 
 func (d *OPUSDecoder) Read() (*avframe.Frame, error) {
-	fmt.Println("opus decoder read frame")
+	d.frame.Fmt = avframe.FormatAudioSample
+	d.frame.PayloadType = avframe.PayloadTypeAudio
+	d.frame.WriteAudioHeader(&avframe.AudioHeader{
+		Codec: avframe.CodecTypeAudioSample,
+		Rate:  0,
+		Bits:  0,
+	})
+	logger.Info("opus decoder read frame")
 	return d.frame, nil
 }
 
 func (d *OPUSDecoder) Write(frame *avframe.Frame) error {
+	if !frame.IsAudio() {
+		return frameerror.ErrBreak
+	}
+
 	frame.TTL++
-	fmt.Println("opus decoder write frame", frame)
+	logger.Info("opus decoder write frame", frame)
 	d.frame = frame
 	return nil
 }
@@ -48,6 +62,21 @@ func (d *OPUSDecoder) Format() avframe.FmtType {
 }
 
 func (d *OPUSDecoder) Feedback(fb *avframe.Feedback) error {
-	fmt.Printf("opus decoder feedback: %+v\n", fb)
+	logger.Infof("opus decoder feedback: %+v", fb)
 	return nil
+}
+
+func (d *OPUSDecoder) Metadata() avframe.Metadata {
+	return avframe.Metadata{
+		FmtType:        avframe.FormatAudioSample,
+		AudioCodecType: avframe.CodecTypeOPUS,
+	}
+}
+
+func (d *OPUSDecoder) UpdateSourceMetadata(metadata avframe.Metadata) {
+	d.inMetadata = metadata
+}
+
+func (d *OPUSDecoder) SetIdle(idle bool) {
+
 }

@@ -2,30 +2,38 @@ package interceptor
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/pingostack/pingos/core/plugin"
 	"github.com/pingostack/pingos/pkg/avframe"
+	"github.com/pingostack/pingos/pkg/logger"
 )
 
+func init() {
+	plugin.RegisterInterceptorPlugin(avframe.FormatRtpRtcp, func(ctx context.Context, metadata avframe.Metadata) (plugin.Interceptor, error) {
+		return &Record{
+			ctx:        ctx,
+			inMetadata: metadata,
+		}, nil
+	})
+}
+
 type Record struct {
-	frame *avframe.Frame
+	ctx        context.Context
+	inMetadata avframe.Metadata
+	frame      *avframe.Frame
 }
 
 func (r *Record) Priority() int {
 	return 0
 }
 
-func (r *Record) Create(ctx context.Context) (plugin.Interceptor, error) {
-	return r, nil
-}
-
 func (r *Record) Close() error {
+	logger.Info("record interceptor close")
 	return nil
 }
 
 func (r *Record) Feedback(fb *avframe.Feedback) error {
-	fmt.Println("record interceptor feedback", fb)
+	logger.Info("record interceptor feedback", fb)
 	return nil
 }
 
@@ -34,19 +42,25 @@ func (r *Record) Format() avframe.FmtType {
 }
 
 func (r *Record) Read() (*avframe.Frame, error) {
-	fmt.Println("record interceptor read frame", r.frame)
+	logger.Info("record interceptor read frame", r.frame)
 	return r.frame, nil
 }
 
 func (r *Record) Write(frame *avframe.Frame) error {
 	frame.TTL++
-	fmt.Println("record interceptor write frame", frame)
+	logger.Info("record interceptor write frame", frame)
 	r.frame = frame
 	return nil
 }
 
-func init() {
-	plugin.RegisterInterceptorPlugin(avframe.FormatRtpRtcp, func(ctx context.Context) (plugin.Interceptor, error) {
-		return &Record{}, nil
-	})
+func (r *Record) Metadata() avframe.Metadata {
+	return avframe.Metadata{
+		FmtType:        r.inMetadata.FmtType,
+		AudioCodecType: r.inMetadata.AudioCodecType,
+		VideoCodecType: r.inMetadata.VideoCodecType,
+	}
+}
+
+func (r *Record) UpdateSourceMetadata(metadata avframe.Metadata) {
+	r.inMetadata = metadata
 }

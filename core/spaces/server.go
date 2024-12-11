@@ -13,10 +13,11 @@ type Server struct {
 	id      string
 }
 
-func NewServer(id string) *Server {
+func NewServer(id string, domains []string) *Server {
 	return &Server{
 		id:      id,
 		routers: make(map[string]*router.Router),
+		domains: domains,
 	}
 }
 
@@ -57,5 +58,24 @@ func (s *Server) DeleteDomain(domain string) {
 			s.domains = append(s.domains[:i], s.domains[i+1:]...)
 			return
 		}
+	}
+}
+
+func (s *Server) MatchDomain(domain string) bool {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	for _, d := range s.domains {
+		if d == domain {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) Close() {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	for _, r := range s.routers {
+		r.Close()
 	}
 }

@@ -1,12 +1,12 @@
 package avframe
 
 type NoopProcessor struct {
-	format FmtType
-	f      *Frame
+	metadata Metadata
+	f        *Frame
 }
 
-func NewNoopProcessor(format FmtType) *NoopProcessor {
-	return &NoopProcessor{format: format}
+func NewNoopProcessor(metadata Metadata) *NoopProcessor {
+	return &NoopProcessor{metadata: metadata}
 }
 
 func (n *NoopProcessor) Feedback(feedback *Feedback) error {
@@ -14,7 +14,7 @@ func (n *NoopProcessor) Feedback(feedback *Feedback) error {
 }
 
 func (n *NoopProcessor) Format() FmtType {
-	return n.format
+	return n.metadata.FmtType
 }
 
 func (n *NoopProcessor) Write(f *Frame) error {
@@ -28,4 +28,12 @@ func (n *NoopProcessor) Read() (*Frame, error) {
 
 func (n *NoopProcessor) Close() error {
 	return nil
+}
+
+func (n *NoopProcessor) Metadata() Metadata {
+	return n.metadata
+}
+
+func (n *NoopProcessor) UpdateSourceMetadata(metadata Metadata) {
+	n.metadata = metadata
 }

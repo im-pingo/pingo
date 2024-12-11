@@ -2,11 +2,11 @@ package stream
 
 import (
 	"context"
-	"fmt"
 	"io"
 
 	"github.com/pingostack/pingos/core/plugin"
 	"github.com/pingostack/pingos/pkg/avframe"
+	"github.com/pingostack/pingos/pkg/logger"
 )
 
 type Format struct {
@@ -14,24 +14,24 @@ type Format struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	data          chan *avframe.Frame
-	demuxer       *avframe.Transmit
-	audioDecoder  *avframe.Transmit
-	videoDecoder  *avframe.Transmit
-	audioEncoder  *avframe.Transmit
-	videoEncoder  *avframe.Transmit
+	demuxer       *avframe.Pipeline
+	audioDecoder  *avframe.Pipeline
+	videoDecoder  *avframe.Pipeline
+	audioEncoder  *avframe.Pipeline
+	videoEncoder  *avframe.Pipeline
 	muxer         plugin.Muxer
-	audioProcess  *avframe.Transmit
-	videoProcess  *avframe.Transmit
-	audioFeedback *avframe.Transmit
-	videoFeedback *avframe.Transmit
+	audioProcess  *avframe.Pipeline
+	videoProcess  *avframe.Pipeline
+	audioFeedback *avframe.Pipeline
+	videoFeedback *avframe.Pipeline
 }
 
 type FormatSettings struct {
-	Demuxer      *avframe.Transmit
-	AudioDecoder *avframe.Transmit
-	VideoDecoder *avframe.Transmit
-	AudioEncoder *avframe.Transmit
-	VideoEncoder *avframe.Transmit
+	Demuxer      *avframe.Pipeline
+	AudioDecoder *avframe.Pipeline
+	VideoDecoder *avframe.Pipeline
+	AudioEncoder *avframe.Pipeline
+	VideoEncoder *avframe.Pipeline
 	Muxer        plugin.Muxer
 }
 
@@ -80,7 +80,7 @@ func (f *Format) Close() error {
 }
 
 func (f *Format) Feedback(fb *avframe.Feedback) error {
-	fmt.Printf("format feedback: %+v\n", fb)
+	logger.Infof("format feedback: %+v", fb)
 	if f.videoFeedback != nil {
 		f.videoFeedback.Feedback(fb)
 	}

@@ -7,5 +7,5 @@ type Publisher interface {
 	// ID returns the unique identifier of the publisher
 	ID() string
 	Format() avframe.FmtType
-	Metadata() *avframe.Metadata
+	Metadata() avframe.Metadata
 }

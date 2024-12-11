@@ -10,7 +10,7 @@ import (
 )
 
 type Plugin[T any, K comparable] struct {
-	Create func(ctx context.Context) (T, error)
+	Create func(ctx context.Context, metadata avframe.Metadata) (T, error)
 	Type   K
 }
 
@@ -23,7 +23,7 @@ type Demuxer interface {
 var demuxerPlugins = map[avframe.FmtType]*Plugin[Demuxer, avframe.FmtType]{}
 var demuxerPluginLock sync.Mutex
 
-func RegisterDemuxerPlugin(typ avframe.FmtType, create func(ctx context.Context) (Demuxer, error)) error {
+func RegisterDemuxerPlugin(typ avframe.FmtType, create func(ctx context.Context, metadata avframe.Metadata) (Demuxer, error)) error {
 	plugin := &Plugin[Demuxer, avframe.FmtType]{
 		Create: create,
 		Type:   typ,
@@ -39,15 +39,15 @@ func RegisterDemuxerPlugin(typ avframe.FmtType, create func(ctx context.Context)
 	return nil
 }
 
-func CreateDemuxerPlugin(ctx context.Context, fmtType avframe.FmtType) (demuxer Demuxer, err error) {
+func CreateDemuxerPlugin(ctx context.Context, metadata avframe.Metadata) (demuxer Demuxer, err error) {
 	demuxerPluginLock.Lock()
 	defer demuxerPluginLock.Unlock()
 
-	plugin, ok := demuxerPlugins[fmtType]
+	plugin, ok := demuxerPlugins[metadata.FmtType]
 	if !ok {
-		return nil, fmt.Errorf("demuxer %s not found", fmtType)
+		return nil, fmt.Errorf("demuxer %s not found", metadata.FmtType)
 	}
-	return plugin.Create(ctx)
+	return plugin.Create(ctx, metadata)
 }
 
 // muxer plugin
@@ -59,7 +59,7 @@ type Muxer interface {
 var muxerPlugins = map[avframe.FmtType]*Plugin[Muxer, avframe.FmtType]{}
 var muxerPluginLock sync.Mutex
 
-func RegisterMuxerPlugin(typ avframe.FmtType, create func(ctx context.Context) (Muxer, error)) error {
+func RegisterMuxerPlugin(typ avframe.FmtType, create func(ctx context.Context, metadata avframe.Metadata) (Muxer, error)) error {
 	plugin := &Plugin[Muxer, avframe.FmtType]{
 		Create: create,
 		Type:   typ,
@@ -75,7 +75,7 @@ func RegisterMuxerPlugin(typ avframe.FmtType, create func(ctx context.Context) (
 	return nil
 }
 
-func CreateMuxerPlugin(ctx context.Context, fmtType avframe.FmtType) (muxer Muxer, err error) {
+func CreateMuxerPlugin(ctx context.Context, fmtType avframe.FmtType, metadata avframe.Metadata) (muxer Muxer, err error) {
 	muxerPluginLock.Lock()
 	defer muxerPluginLock.Unlock()
 
@@ -83,7 +83,7 @@ func CreateMuxerPlugin(ctx context.Context, fmtType avframe.FmtType) (muxer Muxe
 	if !ok {
 		return nil, fmt.Errorf("muxer %s not found", fmtType)
 	}
-	return plugin.Create(ctx)
+	return plugin.Create(ctx, metadata)
 }
 
 // decoder plugin
@@ -95,7 +95,7 @@ type Decoder interface {
 var decoderPlugins = map[avframe.CodecType]*Plugin[Decoder, avframe.CodecType]{}
 var decoderPluginLock sync.Mutex
 
-func RegisterDecoderPlugin(typ avframe.CodecType, create func(ctx context.Context) (Decoder, error)) error {
+func RegisterDecoderPlugin(typ avframe.CodecType, create func(ctx context.Context, metadata avframe.Metadata) (Decoder, error)) error {
 	plugin := &Plugin[Decoder, avframe.CodecType]{
 		Create: create,
 		Type:   typ,
@@ -111,7 +111,7 @@ func RegisterDecoderPlugin(typ avframe.CodecType, create func(ctx context.Contex
 	return nil
 }
 
-func CreateDecoderPlugin(ctx context.Context, codecType avframe.CodecType) (decoder Decoder, err error) {
+func CreateDecoderPlugin(ctx context.Context, codecType avframe.CodecType, metadata avframe.Metadata) (decoder Decoder, err error) {
 	decoderPluginLock.Lock()
 	defer decoderPluginLock.Unlock()
 
@@ -119,7 +119,7 @@ func CreateDecoderPlugin(ctx context.Context, codecType avframe.CodecType) (deco
 	if !ok {
 		return nil, fmt.Errorf("decoder %s not found", codecType)
 	}
-	return plugin.Create(ctx)
+	return plugin.Create(ctx, metadata)
 }
 
 // encoder plugin
@@ -131,7 +131,7 @@ type Encoder interface {
 var encoderPlugins = map[avframe.CodecType]*Plugin[Encoder, avframe.CodecType]{}
 var encoderPluginLock sync.Mutex
 
-func RegisterEncoderPlugin(typ avframe.CodecType, create func(ctx context.Context) (Encoder, error)) error {
+func RegisterEncoderPlugin(typ avframe.CodecType, create func(ctx context.Context, metadata avframe.Metadata) (Encoder, error)) error {
 	plugin := &Plugin[Encoder, avframe.CodecType]{
 		Create: create,
 		Type:   typ,
@@ -147,7 +147,7 @@ func RegisterEncoderPlugin(typ avframe.CodecType, create func(ctx context.Contex
 	return nil
 }
 
-func CreateEncoderPlugin(ctx context.Context, codecType avframe.CodecType) (encoder Encoder, err error) {
+func CreateEncoderPlugin(ctx context.Context, codecType avframe.CodecType, metadata avframe.Metadata) (encoder Encoder, err error) {
 	encoderPluginLock.Lock()
 	defer encoderPluginLock.Unlock()
 
@@ -155,7 +155,7 @@ func CreateEncoderPlugin(ctx context.Context, codecType avframe.CodecType) (enco
 	if !ok {
 		return nil, fmt.Errorf("encoder %s not found", codecType)
 	}
-	return plugin.Create(ctx)
+	return plugin.Create(ctx, metadata)
 }
 
 type Interceptor interface {
@@ -166,7 +166,7 @@ type Interceptor interface {
 var interceptorPlugins = map[avframe.FmtType][]*Plugin[Interceptor, avframe.FmtType]{}
 var interceptorPluginLock sync.Mutex
 
-func RegisterInterceptorPlugin(typ avframe.FmtType, create func(ctx context.Context) (Interceptor, error)) error {
+func RegisterInterceptorPlugin(typ avframe.FmtType, create func(ctx context.Context, metadata avframe.Metadata) (Interceptor, error)) error {
 	plugin := &Plugin[Interceptor, avframe.FmtType]{
 		Create: create,
 		Type:   typ,
@@ -182,16 +182,16 @@ func RegisterInterceptorPlugin(typ avframe.FmtType, create func(ctx context.Cont
 	return nil
 }
 
-func CreateInterceptorPlugins(ctx context.Context, typ avframe.FmtType) (interceptors []Interceptor, err error) {
+func CreateInterceptorPlugins(ctx context.Context, metadata avframe.Metadata) (interceptors []Interceptor, err error) {
 	interceptorPluginLock.Lock()
 	defer interceptorPluginLock.Unlock()
 
-	plugins, ok := interceptorPlugins[typ]
+	plugins, ok := interceptorPlugins[metadata.FmtType]
 	if !ok {
-		return nil, fmt.Errorf("interceptor %s not found", typ)
+		return nil, fmt.Errorf("interceptor %s not found", metadata.FmtType)
 	}
 	for _, plugin := range plugins {
-		interceptor, err := plugin.Create(ctx)
+		interceptor, err := plugin.Create(ctx, metadata)
 		if err != nil {
 			return nil, err
 		}
